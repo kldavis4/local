@@ -11,6 +11,11 @@ provider "aws" {
 # Variables
 ##########################################
 
+variable "aws_profile" {
+  default = "aws-cnn-mls-dev:aws-cnn-mls-dev-devops"
+  type    = string
+}
+
 variable "global_environment_name" {
   description = "A globally unique environment name for S3 buckets."
   type        = string
@@ -57,6 +62,27 @@ variable "private_subnet_cidr_blocks" {
   default     = ["10.10.2.0/24", "10.10.3.0/24"]
 }
 
+variable "vpn_ingress_cidr" {
+  type = list(string)
+  default = [
+    "157.166.175.129/32",
+    "157.166.167.129/32",
+    "157.166.167.150/32",
+    "157.166.167.151/32",
+    "168.161.22.1/32",
+    "168.161.12.0/32",
+    "157.166.167.132/32",
+    "157.166.223.250/32"
+  ]
+}
+
+module "common_vars" {
+  source      = "../common_vars"
+  aws_profile = var.aws_profile
+  app         = var.global_environment_name
+  env         = "eval"
+}
+
 ##########################################
 # Data
 ##########################################
@@ -76,10 +102,21 @@ resource "aws_vpc" "wandb" {
   enable_dns_support   = true
   enable_dns_hostnames = true
 
-  tags = {
-    "Name"                        = "wandb"
-    "kubernetes.io/cluster/wandb" = "shared"
-  }
+  tags = merge(
+    module.common_vars.tags,
+    {
+      "Name"                        = "wandb"
+      "kubernetes.io/cluster/wandb" = "shared"
+    }
+  )
+}
+
+resource "aws_flow_log" "wandb_flow_log" {
+  vpc_id               = aws_vpc.wandb.id
+  traffic_type         = "ALL"
+  log_destination_type = "s3"
+  log_destination      = "arn:aws:s3:::wmcso-central-flowlogs"
+  tags                 = module.common_vars.tags
 }
 
 resource "aws_subnet" "wandb_public" {
@@ -90,10 +127,10 @@ resource "aws_subnet" "wandb_public" {
   vpc_id                  = aws_vpc.wandb.id
   map_public_ip_on_launch = true
 
-  tags = {
+  tags = merge(module.common_vars.tags, {
     "Name"                        = "wandb-public-${count.index}"
     "kubernetes.io/cluster/wandb" = "shared"
-  }
+  })
 }
 
 resource "aws_subnet" "wandb_private" {
@@ -105,10 +142,10 @@ resource "aws_subnet" "wandb_private" {
 
   depends_on = [aws_subnet.wandb_public]
 
-  tags = {
+  tags = merge(module.common_vars.tags, {
     "Name"                        = "wandb-private-${count.index}"
     "kubernetes.io/cluster/wandb" = "shared"
-  }
+  })
 }
 
 resource "aws_eip" "wandb" {
@@ -116,9 +153,9 @@ resource "aws_eip" "wandb" {
 
   vpc = true
 
-  tags = {
+  tags = merge(module.common_vars.tags, {
     Name = "wandb-eip-${count.index}"
-  }
+  })
 }
 
 resource "aws_nat_gateway" "wandb" {
@@ -129,16 +166,16 @@ resource "aws_nat_gateway" "wandb" {
 
   depends_on = [aws_internet_gateway.wandb]
 
-  tags = {
+  tags = merge(module.common_vars.tags, {
     Name = "wandb-nat-gateway-${count.index}"
-  }
+  })
 }
 resource "aws_internet_gateway" "wandb" {
   vpc_id = aws_vpc.wandb.id
 
-  tags = {
+  tags = merge(module.common_vars.tags, {
     Name = "wandb-gateway"
-  }
+  })
 }
 
 resource "aws_route_table" "wandb_public" {
@@ -149,9 +186,9 @@ resource "aws_route_table" "wandb_public" {
     gateway_id = aws_internet_gateway.wandb.id
   }
 
-  tags = {
+  tags = merge(module.common_vars.tags, {
     Name = "wandb-route-table-public"
-  }
+  })
 }
 
 resource "aws_route_table_association" "wandb_public" {
@@ -171,9 +208,9 @@ resource "aws_route_table" "wandb_private" {
     nat_gateway_id = aws_nat_gateway.wandb[count.index].id
   }
 
-  tags = {
+  tags = merge(module.common_vars.tags, {
     Name = "wandb-route-table-private-${count.index}"
-  }
+  })
 }
 
 resource "aws_route_table_association" "wandb_private" {
@@ -192,16 +229,31 @@ resource "aws_security_group" "eks_master" {
   description = "Cluster communication with worker nodes"
   vpc_id      = aws_vpc.wandb.id
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
+  tags = merge(module.common_vars.tags, {
     Name = "wandb-eks-master"
-  }
+  })
+}
+
+resource "aws_security_group_rule" "eks_to_nodes" {
+  cidr_blocks = [
+    "0.0.0.0/0"
+  ]
+  description       = "Allow workstation to communicate with the cluster API Server"
+  from_port         = 0
+  protocol          = "-1"
+  security_group_id = aws_security_group.eks_master.id
+  to_port           = 0
+  type              = "egress"
+}
+
+resource "aws_security_group_rule" "vpn_to_eks" {
+  cidr_blocks       = var.vpn_ingress_cidr
+  description       = "Allow workstation to communicate with the cluster API Server"
+  from_port         = 443
+  protocol          = "tcp"
+  security_group_id = aws_security_group.eks_master.id
+  to_port           = 443
+  type              = "ingress"
 }
 
 resource "aws_eks_cluster" "wandb" {
@@ -220,6 +272,8 @@ resource "aws_eks_cluster" "wandb" {
     aws_iam_role_policy_attachment.wandb_eks_cluster_policy,
     aws_iam_role_policy_attachment.wandb_eks_service_policy,
   ]
+
+  tags = module.common_vars.tags
 }
 
 output "eks_cluster_endpoint" {
@@ -257,6 +311,7 @@ resource "aws_iam_role" "wandb_cluster_role" {
   ]
 }
 POLICY
+  tags               = module.common_vars.tags
 }
 
 resource "aws_iam_role_policy_attachment" "wandb_eks_cluster_policy" {
@@ -283,6 +338,8 @@ data "aws_iam_policy_document" "wandb_node_policy" {
 resource "aws_iam_role" "wandb_node_role" {
   name               = "wandb-eks-node"
   assume_role_policy = data.aws_iam_policy_document.wandb_node_policy.json
+
+  tags = module.common_vars.tags
 }
 
 resource "aws_iam_role_policy_attachment" "wandb_node_worker_policy" {
@@ -371,6 +428,8 @@ resource "aws_eks_node_group" "eks_worker_node_group" {
     aws_iam_role_policy_attachment.wandb_node_cni_policy,
     aws_iam_role_policy_attachment.wandb_node_registry_policy,
   ]
+
+  tags = module.common_vars.tags
 }
 
 ##########################################
@@ -386,14 +445,14 @@ resource "aws_security_group" "wandb_alb" {
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.vpn_ingress_cidr
   }
 
   ingress {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = var.vpn_ingress_cidr
   }
 
   egress {
@@ -403,9 +462,9 @@ resource "aws_security_group" "wandb_alb" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  tags = {
+  tags = merge(module.common_vars.tags, {
     Name = "wandb-alb"
-  }
+  })
 }
 
 resource "aws_lb" "wandb" {
@@ -414,6 +473,8 @@ resource "aws_lb" "wandb" {
   load_balancer_type = "application"
   security_groups    = [aws_security_group.wandb_alb.id]
   subnets            = var.deployment_is_private ? aws_subnet.wandb_private[*].id : aws_subnet.wandb_public[*].id
+
+  tags = module.common_vars.tags
 }
 
 output "lb_address" {
@@ -434,6 +495,8 @@ resource "aws_lb_target_group" "wandb_tg" {
     unhealthy_threshold = 2
     matcher             = "200"
   }
+
+  tags = module.common_vars.tags
 }
 
 resource "aws_lb_listener" "wandb_listener" {
@@ -461,6 +524,8 @@ resource "aws_sqs_queue" "file_metadata" {
 
   # enable long-polling
   receive_wait_time_seconds = 10
+
+  tags = module.common_vars.tags
 }
 
 output "sqs_queue_name" {
@@ -494,6 +559,8 @@ data "aws_iam_policy_document" "file_metadata_queue_policy" {
 
 resource "aws_sns_topic" "file_metadata" {
   name = "wandb-file-metadata-topic"
+
+  tags = module.common_vars.tags
 }
 
 resource "aws_sns_topic_policy" "file_metadata_topic_policy" {
@@ -552,6 +619,8 @@ resource "aws_s3_bucket" "file_storage" {
       }
     }
   }
+
+  tags = module.common_vars.tags
 }
 
 output "s3_bucket_name" {
@@ -578,6 +647,8 @@ resource "aws_s3_bucket_notification" "file_metadata_sns" {
 resource "aws_db_subnet_group" "metadata_subnets" {
   name       = "wandb-db-subnets"
   subnet_ids = aws_subnet.wandb_private[*].id
+
+  tags = module.common_vars.tags
 }
 
 resource "aws_rds_cluster" "metadata_cluster" {
@@ -599,6 +670,8 @@ resource "aws_rds_cluster" "metadata_cluster" {
   vpc_security_group_ids = [aws_security_group.metadata_store.id]
 
   storage_encrypted = true
+
+  tags = module.common_vars.tags
 }
 
 resource "aws_rds_cluster_instance" "metadata_store" {
@@ -607,6 +680,8 @@ resource "aws_rds_cluster_instance" "metadata_store" {
   cluster_identifier   = aws_rds_cluster.metadata_cluster.id
   instance_class       = "db.r5.large"
   db_subnet_group_name = aws_db_subnet_group.metadata_subnets.name
+
+  tags = module.common_vars.tags
 }
 
 output "rds_connection_string" {
@@ -618,9 +693,9 @@ resource "aws_security_group" "metadata_store" {
   description = "Allow inbound traffic from workers to metadata store"
   vpc_id      = aws_vpc.wandb.id
 
-  tags = {
+  tags = merge(module.common_vars.tags, {
     Name = "wandb-metadata-store"
-  }
+  })
 }
 
 resource "aws_security_group_rule" "metadata_ingress_eks_workers" {

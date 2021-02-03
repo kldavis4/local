@@ -13,6 +13,8 @@ provider "kubernetes" {
     command     = "aws-iam-authenticator"
     args        = ["token", "-i", "wandb"]
   }
+
+  version = ">= 1.13.3, < 2.0.0"
 }
 
 ##########################################
