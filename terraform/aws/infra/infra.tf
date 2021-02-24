@@ -84,6 +84,12 @@ module "common_vars" {
   env         = "eval"
 }
 
+resource "aws_kms_key" "this" {
+  description = "This key is used to encrypt and decrypt the wandb s3 bucket and rds"
+
+  tags = module.common_vars.tags
+}
+
 ##########################################
 # Data
 ##########################################
@@ -372,6 +378,14 @@ resource "aws_iam_policy" "wandb_node_s3_policy" {
           "${aws_s3_bucket.file_storage.arn}",
           "${aws_s3_bucket.file_storage.arn}/*"
         ]
+    },
+    {
+        "Effect": "Allow",
+        "Action": [
+          "kms:Decrypt",
+          "kms:GenerateDatakey"
+        ],
+        "Resource": "${aws_kms_key.this.arn}"
     }
   ]
 }
@@ -616,7 +630,8 @@ resource "aws_s3_bucket" "file_storage" {
   server_side_encryption_configuration {
     rule {
       apply_server_side_encryption_by_default {
-        sse_algorithm = "AES256"
+        kms_master_key_id = aws_kms_key.this.arn
+        sse_algorithm     = "aws:kms"
       }
     }
   }
@@ -667,6 +682,7 @@ resource "aws_rds_cluster" "metadata_cluster" {
   database_name   = "wandb_local"
   master_username = "wandb"
   master_password = var.db_password
+  kms_key_id      = aws_kms_key.this.arn
 
   vpc_security_group_ids = [aws_security_group.metadata_store.id]
 
