@@ -62,6 +62,11 @@ variable "private_subnet_cidr_blocks" {
   default     = ["10.10.2.0/24", "10.10.3.0/24"]
 }
 
+variable "acm_certificate_arn" {
+  description = "acm certificate arn"
+  default     = "arn:aws:acm:us-east-1:359284644261:certificate/dc11f9c7-30ff-482f-aa37-631a394436fd"
+}
+
 variable "vpn_ingress_cidr" {
   type = list(string)
   default = [
@@ -493,7 +498,7 @@ resource "aws_lb" "wandb" {
 }
 
 output "lb_address" {
-  value = "http://${aws_lb.wandb.dns_name}"
+  value = "https://${aws_lb.wandb.dns_name}"
 }
 
 resource "aws_lb_target_group" "wandb_tg" {
@@ -516,8 +521,10 @@ resource "aws_lb_target_group" "wandb_tg" {
 
 resource "aws_lb_listener" "wandb_listener" {
   load_balancer_arn = aws_lb.wandb.arn
-  port              = "80"
-  protocol          = "HTTP"
+  port              = "443"
+  protocol          = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-2016-08"
+  certificate_arn   = var.acm_certificate_arn
 
   default_action {
     type             = "forward"
